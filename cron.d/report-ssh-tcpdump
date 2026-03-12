@@ -1,0 +1,29 @@
+# /etc/cron.d/report-ssh-tcpdump
+#
+# Cron schedule for report-ssh-tcpdump.sh
+#
+# Edit the settings below to suit your environment:
+#   - Adjust the schedule (currently: every hour)
+#   - Set REPORT_EMAIL to receive the report by email
+#   - Set CAPTURE_SECONDS to change the capture window (default: 60 seconds)
+#   - Set CAPTURE_IFACE to capture on a specific interface (default: any)
+#   - Change the output path after -o if you prefer a file instead of email
+#
+# Install:
+#   sudo cp cron.d/report-ssh-tcpdump /etc/cron.d/report-ssh-tcpdump
+#   sudo chmod 644 /etc/cron.d/report-ssh-tcpdump
+#   sudo cp report-ssh-tcpdump.sh /usr/local/bin/report-ssh-tcpdump.sh
+#   sudo chmod 755 /usr/local/bin/report-ssh-tcpdump.sh
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Capture 60 seconds of SSH traffic at the start of each hour, email to root
+# Minute Hour DayOfMonth Month DayOfWeek User  Command
+0       *    *          *     *          root  /usr/local/bin/report-ssh-tcpdump.sh -t 60 -e root
+
+# Alternative: capture 5 minutes every hour on a specific interface
+# 0 * * * * root /usr/local/bin/report-ssh-tcpdump.sh -t 300 -i eth0 -e root
+
+# Alternative: write report to a dated file instead of emailing it
+# 0 * * * * root /usr/local/bin/report-ssh-tcpdump.sh -t 60 -o /var/log/ssh-traffic-$(date +\%Y\%m\%d-\%H).log
