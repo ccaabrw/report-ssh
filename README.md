@@ -76,7 +76,121 @@ sudo chmod 644 /etc/cron.d/report-ssh
 Edit `/etc/cron.d/report-ssh` to set your preferred schedule and email address.
 The default runs daily at 06:00 and emails the report to `root`.
 
-## Sample Output
+---
+
+## report-ssh-tcpdump.sh
+
+A companion script that uses **tcpdump** to capture and report on incoming TCP
+connection attempts to SSH port 22 in real time.
+
+### Features
+
+- **Live packet capture** – uses `tcpdump` to capture TCP SYN packets destined
+  for port 22 (new connection attempts, not established sessions).
+- **Configurable duration** – captures traffic for a fixed number of seconds,
+  making it safe to schedule as a periodic cron job.
+- **Per-attempt log** – lists every observed connection attempt with timestamp,
+  source IP, and source port.
+- **Source IP summary** – collates unique source IPs and their attempt counts,
+  sorted by highest frequency.
+- **Cron-friendly** – output can be directed to stdout, a file (`-o`), or
+  emailed (`-e`).
+
+### Requirements
+
+- Bash 4+
+- `tcpdump` (must be installed and in `PATH`)
+- `timeout` (GNU coreutils)
+- Root privileges (required for raw packet capture)
+- `mail` (optional, for email delivery)
+
+### Installation
+
+```bash
+sudo cp report-ssh-tcpdump.sh /usr/local/bin/report-ssh-tcpdump.sh
+sudo chmod 755 /usr/local/bin/report-ssh-tcpdump.sh
+```
+
+### Usage
+
+```
+report-ssh-tcpdump.sh [OPTIONS]
+
+Options:
+  -t SECONDS  Duration to capture in seconds (default: 60)
+  -i IFACE    Network interface to capture on (default: any)
+  -e EMAIL    Email address to send report to
+  -o FILE     Write report to FILE instead of stdout
+  -h          Show help
+```
+
+Environment variables `CAPTURE_SECONDS`, `CAPTURE_IFACE`, and `REPORT_EMAIL`
+mirror the `-t`, `-i`, and `-e` options and can be set in cron environments.
+
+### Examples
+
+```bash
+# Capture 60 seconds of traffic and print the report
+sudo report-ssh-tcpdump.sh
+
+# Capture for 5 minutes on a specific interface
+sudo report-ssh-tcpdump.sh -t 300 -i eth0
+
+# Email an hourly report
+sudo report-ssh-tcpdump.sh -t 60 -e admin@example.com
+
+# Write a dated log file
+sudo report-ssh-tcpdump.sh -t 60 -o /var/log/ssh-traffic-$(date +%Y%m%d-%H).log
+```
+
+### Cron Setup
+
+```bash
+sudo cp cron.d/report-ssh-tcpdump /etc/cron.d/report-ssh-tcpdump
+sudo chmod 644 /etc/cron.d/report-ssh-tcpdump
+```
+
+Edit `/etc/cron.d/report-ssh-tcpdump` to set your preferred schedule, capture
+duration, and email address.  The default runs at the top of every hour,
+captures 60 seconds of traffic, and emails the report to `root`.
+
+### Sample Output
+
+```
+============================================================
+  SSH Port 22 Traffic Report (tcpdump)
+  Host:      myserver.example.com
+  Generated: 2024-01-15 07:00:01 UTC
+  Interface: any
+  Duration:  60 second(s)
+  Captured:  3 connection attempt(s)
+============================================================
+
+------------------------------------------------------------
+  INCOMING SSH CONNECTION ATTEMPTS
+------------------------------------------------------------
+  TIMESTAMP                    SOURCE IP              SOURCE PORT
+  ---------                    ---------              -----------
+  07:00:03.124518              203.0.113.42           54321
+  07:00:15.882341              198.51.100.7           61000
+  07:00:47.003192              203.0.113.42           54399
+
+------------------------------------------------------------
+  SOURCE IP SUMMARY
+------------------------------------------------------------
+  SOURCE IP              ATTEMPTS
+  ---------              --------
+  203.0.113.42                  2
+  198.51.100.7                  1
+
+============================================================
+  End of Report
+============================================================
+```
+
+---
+
+## Sample Output (report-ssh.sh)
 
 ```
 ============================================================
