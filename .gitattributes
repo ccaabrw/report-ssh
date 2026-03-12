@@ -1,0 +1,2 @@
+*.sh text eol=lf
+cron.d/* text eol=lf
