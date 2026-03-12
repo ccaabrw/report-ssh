@@ -11,6 +11,7 @@
 #   report-ssh.sh [OPTIONS]
 #
 # Options:
+#   -a         Show authentication type for each session-open event
 #   -d DAYS    Number of days to report on (default: 7)
 #   -e EMAIL   Email address to send report to
 #   -o FILE    Write report to FILE instead of stdout
@@ -31,6 +32,7 @@ set -uo pipefail
 DAYS="${REPORT_DAYS:-7}"
 OUTPUT_EMAIL="${REPORT_EMAIL:-}"
 OUTPUT_FILE=""
+SHOW_AUTH_TYPE=0
 
 # ---------------------------------------------------------------------------
 # Helper: print usage
@@ -43,8 +45,9 @@ usage() {
 # ---------------------------------------------------------------------------
 # Parse CLI options
 # ---------------------------------------------------------------------------
-while getopts ":d:e:o:h" opt; do
+while getopts ":d:e:o:ah" opt; do
     case "$opt" in
+        a) SHOW_AUTH_TYPE=1 ;;
         d) DAYS="$OPTARG" ;;
         e) OUTPUT_EMAIL="$OPTARG" ;;
         o) OUTPUT_FILE="$OPTARG" ;;
@@ -135,6 +138,13 @@ collect_session_lines() {
         return
     fi
 
+    # When showing auth type, also collect "Accepted" lines so we can
+    # correlate them with session-open events via the sshd PID.
+    local grep_pattern='session opened for user'
+    if [ "$SHOW_AUTH_TYPE" -eq 1 ]; then
+        grep_pattern='session opened for user|sshd\[[0-9]+\]: Accepted '
+    fi
+
     for f in "${LOG_FILES[@]}"; do
         if [ ! -r "$f" ]; then
             printf 'WARN: %s is not readable (try running as root)\n' "$f" >&2
@@ -142,7 +152,7 @@ collect_session_lines() {
         fi
         read_log "$f"
     done \
-    | grep 'session opened for user' \
+    | grep -E "$grep_pattern" \
     | awk -v cutoff="$cutoff" -v yr="$current_year" '
         # Syslog months (1-based index)
         BEGIN {
@@ -188,14 +198,28 @@ section_session_list() {
         return
     fi
 
-    printf '  %-14s %-16s %s\n' "TIMESTAMP" "USER" "LOG ENTRY"
-    printf '  %-14s %-16s %s\n' "---------" "----" "---------"
+    if [ "$SHOW_AUTH_TYPE" -eq 1 ]; then
+        printf '  %-14s %-16s %-15s %s\n' "TIMESTAMP" "USER" "AUTH TYPE" "LOG ENTRY"
+        printf '  %-14s %-16s %-15s %s\n' "---------" "----" "---------" "---------"
+    else
+        printf '  %-14s %-16s %s\n' "TIMESTAMP" "USER" "LOG ENTRY"
+        printf '  %-14s %-16s %s\n' "---------" "----" "---------"
+    fi
 
-    echo "$data" | awk '
+    echo "$data" | awk -v show_auth="$SHOW_AUTH_TYPE" '
+    /Accepted / {
+        # Build PID -> auth-type map from "Accepted <method> for ..." lines.
+        # Field 5 has the form "sshd[PID]:" – extract the numeric PID.
+        pid = $5
+        sub(/.*\[/, "", pid)
+        sub(/\].*/, "", pid)
+        for (i = 1; i <= NF; i++) {
+            if ($i == "Accepted") { auth_map[pid] = $(i+1); break }
+        }
+        next
+    }
     {
-        # Timestamp: fields 1-3  (Mmm DD HH:MM:SS)
         ts = $1 " " $2 " " $3
-        # Extract username after "for user"
         user = ""
         for (i = 1; i <= NF; i++) {
             if ($i == "user" && $(i+1) != "") {
@@ -205,7 +229,15 @@ section_session_list() {
                 break
             }
         }
-        printf "  %-14s %-16s %s\n", ts, user, $0
+        if (show_auth) {
+            pid = $5
+            sub(/.*\[/, "", pid)
+            sub(/\].*/, "", pid)
+            authtype = (pid in auth_map) ? auth_map[pid] : "-"
+            printf "  %-14s %-16s %-15s %s\n", ts, user, authtype, $0
+        } else {
+            printf "  %-14s %-16s %s\n", ts, user, $0
+        }
     }' | sort
 }
 
