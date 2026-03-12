@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 #
-# report-ssh.sh - Report on SSH connections to this system
+# report-ssh.sh - Report on SSH sessions opened on this system
 #
-# Captures:
-#   - Interactive login sessions (sessions with PTY allocation)
-#   - Jump/tunnel connections (direct-tcpip port forwarding sessions)
-# Produces:
-#   - Collated list of users and connection counts
-#   - Summary of connection times per user
+# Collates all "session opened for user" messages from the secure log files
+# (including rotated and compressed copies) and produces:
+#   - A chronological list of every session-open event
+#   - A collated summary of session counts per user
 #
 # Usage:
 #   report-ssh.sh [OPTIONS]
@@ -68,50 +66,51 @@ fi
 REPORT_HOST=$(hostname -f 2>/dev/null || hostname)
 REPORT_TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S %Z')
 
-# Locate the SSH auth log (distro-agnostic)
-detect_auth_log() {
-    local candidates=(
-        /var/log/auth.log        # Debian / Ubuntu
-        /var/log/secure          # RHEL / CentOS / Fedora
-        /var/log/messages        # older distros / fallback
-    )
-    for f in "${candidates[@]}"; do
-        if [ -f "$f" ]; then
-            echo "$f"
-            return
-        fi
+# ---------------------------------------------------------------------------
+# Locate all candidate auth/secure log files, including rotated and
+# gzip-compressed copies (e.g. auth.log.1, auth.log.2.gz, secure.1 …)
+# Returns one path per line.
+# ---------------------------------------------------------------------------
+detect_log_files() {
+    local found=()
+    local f
+    # Use nullglob so unmatched glob patterns expand to nothing
+    local old_nullglob
+    old_nullglob=$(shopt -p nullglob)
+    shopt -s nullglob
+    for f in \
+        /var/log/auth.log \
+        /var/log/auth.log.[0-9]* \
+        /var/log/auth.log.[0-9]*.gz \
+        /var/log/secure \
+        /var/log/secure.[0-9]* \
+        /var/log/secure.[0-9]*.gz \
+        /var/log/messages
+    do
+        [ -f "$f" ] && found+=("$f")
     done
-    echo ""
-}
-AUTH_LOG=$(detect_auth_log)
-
-# ---------------------------------------------------------------------------
-# Section helpers
-# ---------------------------------------------------------------------------
-divider() { printf '%s\n' "------------------------------------------------------------"; }
-header()  { printf '\n%s\n  %s\n%s\n' "$(divider)" "$*" "$(divider)"; }
-
-# ---------------------------------------------------------------------------
-# Check whether the 'last' command supports -s (since <date>)
-# (GNU coreutils ≥ 2.28 / util-linux ≥ 2.24 support -s)
-# ---------------------------------------------------------------------------
-last_supports_since() {
-    last -s "-1days" -- /dev/null >/dev/null 2>&1
+    eval "$old_nullglob"
+    # De-duplicate (a plain glob like auth.log.[0-9]* also matches *.gz files)
+    printf '%s\n' "${found[@]+"${found[@]}"}" | sort -u
 }
 
-# Build the 'last' invocation appropriate for this system
-# Output: username  tty  from  login-time  [logout-time]  [(duration)]
-run_last() {
-    if last_supports_since; then
-        last -F -w -s "-${DAYS}days" 2>/dev/null
-    else
-        # Fallback: fetch more lines and let awk filter by date
-        last -F -w 2>/dev/null | head -10000
-    fi
+# Populate LOG_FILES once at startup so the list is shared across sections
+mapfile -t LOG_FILES < <(detect_log_files)
+
+# ---------------------------------------------------------------------------
+# Read a log file, transparently decompressing .gz files
+# ---------------------------------------------------------------------------
+read_log() {
+    local f="$1"
+    case "$f" in
+        *.gz) zcat "$f" 2>/dev/null ;;
+        *)    cat  "$f" 2>/dev/null ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
-# Filter a 'last -F' line by whether its login timestamp is within $DAYS days
+# Emit epoch seconds for the start of the reporting window.
+# Supports both GNU date (-d) and BSD date (-v).
 # ---------------------------------------------------------------------------
 cutoff_epoch() {
     date -d "-${DAYS} days" '+%s' 2>/dev/null \
@@ -120,215 +119,125 @@ cutoff_epoch() {
 }
 
 # ---------------------------------------------------------------------------
-# Section 1: Interactive SSH logins
+# Collect all "session opened for user" lines from all log files,
+# filtered to the last $DAYS days.
+#
+# Syslog timestamp format (no year): "Mmm DD HH:MM:SS"
+# We reconstruct a year-qualified timestamp for date comparison.
 # ---------------------------------------------------------------------------
-section_interactive_logins() {
-    header "INTERACTIVE SSH LOGINS (last ${DAYS} day(s))"
+collect_session_lines() {
+    local cutoff
+    cutoff=$(cutoff_epoch)
+    local current_year
+    current_year=$(date '+%Y')
 
-    if ! command -v last >/dev/null 2>&1; then
-        echo "  'last' command not available on this system."
+    if [ "${#LOG_FILES[@]}" -eq 0 ]; then
         return
     fi
 
-    local output
-    output=$(run_last | grep -v '^reboot\|^shutdown\|^wtmp begins\|^$' || true)
-
-    if [ -z "$output" ]; then
-        echo "  No login records found."
-        return
-    fi
-
-    printf '  %-12s %-8s %-20s %-28s %-28s %s\n' \
-        "USER" "TTY" "FROM" "LOGIN" "LOGOUT" "DURATION"
-    printf '  %-12s %-8s %-20s %-28s %-28s %s\n' \
-        "----" "---" "----" "-----" "------" "--------"
-
-    echo "$output" | awk -v days="$DAYS" '
-    NF >= 4 {
-        user   = $1
-        tty    = $2
-        from   = $3
-        # last -F produces: Www Mmm DD HH:MM:SS YYYY  (5 tokens per timestamp)
-        login  = $4 " " $5 " " $6 " " $7 " " $8
-        logout = ""
-        dur    = ""
-        if (NF >= 13) {
-            logout = $9 " " $10 " " $11 " " $12 " " $13
+    for f in "${LOG_FILES[@]}"; do
+        if [ ! -r "$f" ]; then
+            printf 'WARN: %s is not readable (try running as root)\n' "$f" >&2
+            continue
+        fi
+        read_log "$f"
+    done \
+    | grep 'session opened for user' \
+    | awk -v cutoff="$cutoff" -v yr="$current_year" '
+        # Syslog months (1-based index)
+        BEGIN {
+            split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", M)
+            for (i=1; i<=12; i++) mon[M[i]] = i
         }
-        if (match($0, /\(([0-9+:]+)\)/, arr)) {
-            dur = arr[1]
-        } else if (match($0, /still logged in/)) {
-            dur = "active"
-        } else if (match($0, /no logout/)) {
-            dur = "no logout"
-        }
-        printf "  %-12s %-8s %-20s %-28s %-28s %s\n", user, tty, from, login, logout, dur
-    }'
-}
-
-# ---------------------------------------------------------------------------
-# Section 2: Jump / tunnel connections
-# Identified by "direct-tcpip" entries in the SSH auth log.
-# When a server acts as a ProxyJump host the connecting client opens a
-# direct-tcpip channel; this appears in the auth log even if no PTY is used.
-# ---------------------------------------------------------------------------
-section_jump_connections() {
-    header "JUMP / TUNNEL CONNECTIONS (last ${DAYS} day(s))"
-
-    if [ -z "$AUTH_LOG" ]; then
-        echo "  SSH auth log not found on this system."
-        return
-    fi
-
-    if [ ! -r "$AUTH_LOG" ]; then
-        echo "  Auth log '$AUTH_LOG' is not readable. Try running as root."
-        return
-    fi
-
-    # Build a date pattern covering the last $DAYS days (Month Day format)
-    local patterns=()
-    local i
-    for (( i=0; i<DAYS; i++ )); do
-        patterns+=("$(date -d "-${i} days" '+%b %e' 2>/dev/null \
-                   || date -v "-${i}d" '+%b %e' 2>/dev/null)")
-    done
-
-    # Grep the auth log for direct-tcpip lines within the date window
-    local grep_pattern
-    grep_pattern=$(IFS='|'; echo "${patterns[*]}")
-
-    local results
-    results=$(grep -E "direct-tcpip" "$AUTH_LOG" 2>/dev/null \
-              | grep -E "($grep_pattern)" || true)
-
-    if [ -z "$results" ]; then
-        echo "  No jump/tunnel connections found in '$AUTH_LOG'."
-        return
-    fi
-
-    printf '  %-12s %-22s %-22s %s\n' "USER" "FROM (client)" "TO (destination)" "TIMESTAMP"
-    printf '  %-12s %-22s %-22s %s\n' "----" "-------------" "----------------" "---------"
-
-    # Example log line:
-    # Jan  1 12:00:00 host sshd[1234]: Accepted publickey for alice from 1.2.3.4 port 54321 ...
-    # Jan  1 12:00:01 host sshd[1234]: direct-tcpip: hostbound [alice] to server.example.com port 22 from 1.2.3.4 port 54321
-    echo "$results" | awk '
-    {
-        # Timestamp = fields 1-3
-        ts = $1 " " $2 " " $3
-        # Extract user (after "for" keyword)
-        user = ""
-        from = ""
-        to   = ""
-        for (i = 1; i <= NF; i++) {
-            if ($i == "for" && $(i+1) != "") { user = $(i+1) }
-            if ($i == "from" && $(i+1) != "") { from = $(i+1) }
-            if (($i == "to" || $i == "host") && $(i+1) != "") {
-                candidate = $(i+1)
-                if (candidate ~ /^[a-zA-Z0-9._-]+$/) { to = candidate }
+        NF >= 5 {
+            # Fields: Month Day HH:MM:SS hostname process[pid]: message...
+            mname = $1; day = $2; hms = $3
+            split(hms, t, ":")
+            ts = sprintf("%04d %02d %02d %02d %02d %02d",
+                         yr, mon[mname]+0, day+0, t[1]+0, t[2]+0, t[3]+0)
+            # Convert to epoch via mktime (gawk)
+            epoch = mktime(ts)
+            # If the computed epoch is in the future, the log entry is from the
+            # previous year (e.g. Dec entries read in January)
+            if (epoch > systime()) {
+                yr_adj = yr - 1
+                ts = sprintf("%04d %02d %02d %02d %02d %02d",
+                             yr_adj, mon[mname]+0, day+0, t[1]+0, t[2]+0, t[3]+0)
+                epoch = mktime(ts)
             }
+            if (epoch >= cutoff) print $0
         }
-        printf "  %-12s %-22s %-22s %s\n", user, from, to, ts
-    }'
+    '
 }
 
 # ---------------------------------------------------------------------------
-# Section 3: User summary – connection counts
+# Section helpers
 # ---------------------------------------------------------------------------
-section_user_summary() {
-    header "USER CONNECTION SUMMARY (last ${DAYS} day(s))"
-
-    if ! command -v last >/dev/null 2>&1; then
-        echo "  'last' command not available on this system."
-        return
-    fi
-
-    printf '  %-16s %11s\n' "USERNAME" "CONNECTIONS"
-    printf '  %-16s %11s\n' "--------" "-----------"
-
-    run_last \
-        | grep -v '^reboot\|^shutdown\|^wtmp begins\|^$' \
-        | awk '{print $1}' \
-        | sort \
-        | uniq -c \
-        | sort -rn \
-        | awk '{printf "  %-16s %11d\n", $2, $1}' \
-        || echo "  No records found."
-}
+divider() { printf '%s\n' "------------------------------------------------------------"; }
+header()  { printf '\n%s\n  %s\n%s\n' "$(divider)" "$*" "$(divider)"; }
 
 # ---------------------------------------------------------------------------
-# Section 4: Connection time summary – total and per-user
+# Section 1: Chronological list of session-open events
 # ---------------------------------------------------------------------------
-# Parse a duration string like "00:30", "1:30", or "5+02:30" into seconds
-duration_to_seconds() {
-    local d="$1"
-    local days=0 hours=0 mins=0
-    if [[ "$d" == *+* ]]; then
-        days="${d%%+*}"
-        d="${d#*+}"
-    fi
-    hours="${d%%:*}"
-    mins="${d##*:}"
-    echo $(( (days * 86400) + (hours * 3600) + (mins * 60) ))
-}
-
-section_connection_times() {
-    header "CONNECTION TIME SUMMARY (last ${DAYS} day(s))"
-
-    if ! command -v last >/dev/null 2>&1; then
-        echo "  'last' command not available on this system."
-        return
-    fi
-
-    # Collect raw data: username and duration token
-    local data
-    data=$(run_last | grep -v '^reboot\|^shutdown\|^wtmp begins\|^$' || true)
+section_session_list() {
+    local data="$1"
+    header "SSH SESSIONS OPENED (last ${DAYS} day(s))"
 
     if [ -z "$data" ]; then
-        echo "  No records found."
+        echo "  No 'session opened' records found."
         return
     fi
 
-    printf '  %-16s %10s %10s %10s %10s\n' \
-        "USERNAME" "SESSIONS" "TOTAL(h)" "AVG(h)" "STATUS"
-    printf '  %-16s %10s %10s %10s %10s\n' \
-        "--------" "--------" "--------" "------" "------"
+    printf '  %-14s %-16s %s\n' "TIMESTAMP" "USER" "LOG ENTRY"
+    printf '  %-14s %-16s %s\n' "---------" "----" "---------"
 
     echo "$data" | awk '
-    function seconds_from_dur(dur,    d, h, m) {
-        d = 0; h = 0; m = 0
-        if (index(dur, "+") > 0) {
-            d = substr(dur, 1, index(dur, "+") - 1)
-            dur = substr(dur, index(dur, "+") + 1)
-        }
-        split(dur, a, ":")
-        h = a[1]; m = a[2]
-        return (d * 86400) + (h * 3600) + (m * 60)
-    }
     {
-        user = $1
-        sessions[user]++
-        # Look for duration token "(D+HH:MM)" or "(HH:MM)"
-        if (match($0, /\(([0-9]+\+)?[0-9]+:[0-9]+\)/, arr)) {
-            dur = substr(arr[0], 2, length(arr[0]) - 2)
-            total_secs[user] += seconds_from_dur(dur)
+        # Timestamp: fields 1-3  (Mmm DD HH:MM:SS)
+        ts = $1 " " $2 " " $3
+        # Extract username after "for user"
+        user = ""
+        for (i = 1; i <= NF; i++) {
+            if ($i == "user" && $(i+1) != "") {
+                user = $(i+1)
+                # Strip a trailing parenthesised uid if present, e.g. "alice(uid=1000)"
+                sub(/\(.*/, "", user)
+                break
+            }
         }
-        # Track active/no-logout sessions
-        if ($0 ~ /still logged in/)  active[user]++
-        if ($0 ~ /no logout/)        no_logout[user]++
+        printf "  %-14s %-16s %s\n", ts, user, $0
+    }' | sort
+}
+
+# ---------------------------------------------------------------------------
+# Section 2: Collated summary – session counts per user
+# ---------------------------------------------------------------------------
+section_user_summary() {
+    local data="$1"
+    header "USER SESSION SUMMARY (last ${DAYS} day(s))"
+
+    if [ -z "$data" ]; then
+        echo "  No 'session opened' records found."
+        return
+    fi
+
+    printf '  %-20s %11s\n' "USERNAME" "SESSIONS"
+    printf '  %-20s %11s\n' "--------" "--------"
+
+    echo "$data" | awk '
+    {
+        for (i = 1; i <= NF; i++) {
+            if ($i == "user" && $(i+1) != "") {
+                user = $(i+1)
+                sub(/\(.*/, "", user)
+                count[user]++
+                break
+            }
+        }
     }
     END {
-        for (user in sessions) {
-            s = sessions[user]
-            t = total_secs[user]
-            total_h = t / 3600.0
-            avg_h   = (s > 0) ? (total_h / s) : 0
-            status  = ""
-            if (user in active)   status = active[user]   " active"
-            if (user in no_logout) status = (status ? status ", " : "") no_logout[user] " no-logout"
-            printf "  %-16s %10d %10.2f %10.2f %10s\n", user, s, total_h, avg_h, status
-        }
-    }' | sort -k1
+        for (u in count) printf "  %-20s %11d\n", u, count[u]
+    }' | sort -k2 -rn
 }
 
 # ---------------------------------------------------------------------------
@@ -336,19 +245,26 @@ section_connection_times() {
 # ---------------------------------------------------------------------------
 generate_report() {
     printf '%s\n' "============================================================"
-    printf '  SSH Connection Report\n'
+    printf '  SSH Session Report\n'
     printf '  Host:      %s\n' "$REPORT_HOST"
     printf '  Generated: %s\n' "$REPORT_TIMESTAMP"
     printf '  Period:    Last %d day(s)\n' "$DAYS"
-    if [ -n "$AUTH_LOG" ]; then
-        printf '  Auth log:  %s\n' "$AUTH_LOG"
+    if [ "${#LOG_FILES[@]}" -gt 0 ]; then
+        printf '  Log files: %s\n' "${LOG_FILES[0]}"
+        local f
+        for f in "${LOG_FILES[@]:1}"; do
+            printf '             %s\n' "$f"
+        done
+    else
+        printf '  Log files: (none found)\n'
     fi
     printf '%s\n' "============================================================"
 
-    section_interactive_logins
-    section_jump_connections
-    section_user_summary
-    section_connection_times
+    local data
+    data=$(collect_session_lines)
+
+    section_session_list  "$data"
+    section_user_summary  "$data"
 
     printf '\n%s\n' "============================================================"
     printf '  End of Report\n'

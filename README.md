@@ -1,30 +1,31 @@
 # report-ssh
 
-A Bash script that reports on SSH connections to a Linux system.
+A Bash script that collates SSH session-open events on a Linux system by
+scanning the secure log files.
 
 ## Features
 
-- **Interactive logins** – lists sessions where a PTY was allocated (standard
-  shell logins), including login/logout timestamps and session duration.
-- **Jump / tunnel connections** – identifies sessions used as SSH jump hosts
-  or port-forwarding tunnels (`direct-tcpip` entries in the auth log).
-- **User summary** – collates all unique users and their total connection count.
-- **Connection time summary** – per-user totals and averages for session
-  duration, plus flags for sessions still active or lacking a clean logout.
+- **Secure log scanning** – reads the system auth/secure log files, including
+  rotated and gzip-compressed copies, to find every
+  `session opened for user` message within the configured date window.
+- **Chronological session list** – shows every session-open event with its
+  timestamp and username.
+- **User summary** – collates all unique users and their total session count,
+  sorted by frequency.
 - **Cron-friendly** – output can be directed to stdout, a file (`-o`), or
   emailed (`-e`).
 
 ## Requirements
 
-- Bash 4+
-- `last` / `lastb` (util-linux or equivalent)
+- Bash 4+ with gawk (for `mktime`/`systime`)
 - Read access to the SSH auth log:
-  - Debian/Ubuntu: `/var/log/auth.log`
-  - RHEL/CentOS/Fedora: `/var/log/secure`
+  - Debian/Ubuntu: `/var/log/auth.log` (and rotated copies)
+  - RHEL/CentOS/Fedora: `/var/log/secure` (and rotated copies)
+- `zcat` (for reading gzip-compressed rotated logs)
 - `mail` (optional, for email delivery)
 
-The script must be run as **root** (or a user with read access to the auth log
-and `/var/log/wtmp`) to access all data sources.
+The script must be run as **root** (or a user with read access to the auth
+log files) to access all data sources.
 
 ## Installation
 
@@ -194,43 +195,31 @@ captures 60 seconds of traffic, and emails the report to `root`.
 
 ```
 ============================================================
-  SSH Connection Report
+  SSH Session Report
   Host:      myserver.example.com
   Generated: 2024-01-15 06:00:01 UTC
   Period:    Last 7 day(s)
-  Auth log:  /var/log/auth.log
+  Log files: /var/log/auth.log
+             /var/log/auth.log.1
+             /var/log/auth.log.2.gz
 ============================================================
 
 ------------------------------------------------------------
-  INTERACTIVE SSH LOGINS (last 7 day(s))
+  SSH SESSIONS OPENED (last 7 day(s))
 ------------------------------------------------------------
-  USER         TTY      FROM                 LOGIN                        LOGOUT                       DURATION
-  ----         ---      ----                 -----                        ------                       --------
-  alice        pts/0    10.0.0.5             Mon Jan 08 09:12:34 2024     Mon Jan 08 10:45:01 2024     1:32
-  bob          pts/1    192.168.1.20         Tue Jan 09 14:00:00 2024     still logged in              active
+  TIMESTAMP      USER             LOG ENTRY
+  ---------      ----             ---------
+  Jan  8 09:12  alice            Jan  8 09:12:34 myserver sshd[1234]: pam_unix(sshd:session): session opened for user alice by (uid=0)
+  Jan  8 14:00  bob              Jan  8 14:00:00 myserver sshd[5678]: pam_unix(sshd:session): session opened for user bob by (uid=0)
+  Jan  9 08:45  alice            Jan  9 08:45:11 myserver sshd[9012]: pam_unix(sshd:session): session opened for user alice by (uid=0)
 
 ------------------------------------------------------------
-  JUMP / TUNNEL CONNECTIONS (last 7 day(s))
+  USER SESSION SUMMARY (last 7 day(s))
 ------------------------------------------------------------
-  USER         FROM (client)          TO (destination)       TIMESTAMP
-  ----         -------------          ----------------       ---------
-  alice        10.0.0.5               server2.internal       Jan  8 09:13
-
-------------------------------------------------------------
-  USER CONNECTION SUMMARY (last 7 day(s))
-------------------------------------------------------------
-  USERNAME          CONNECTIONS
-  --------          -----------
-  alice                       5
-  bob                         2
-
-------------------------------------------------------------
-  CONNECTION TIME SUMMARY (last 7 day(s))
-------------------------------------------------------------
-  USERNAME          SESSIONS   TOTAL(h)     AVG(h)     STATUS
-  --------          --------   --------     ------     ------
-  alice                    5       8.25       1.65
-  bob                      2       0.00       0.00      1 active
+  USERNAME                    SESSIONS
+  --------                    --------
+  alice                              5
+  bob                                2
 
 ============================================================
   End of Report
