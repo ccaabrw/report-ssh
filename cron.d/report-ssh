@@ -1,0 +1,28 @@
+# /etc/cron.d/report-ssh
+#
+# Cron schedule for report-ssh.sh
+#
+# Edit the settings below to suit your environment:
+#   - Adjust the schedule (currently: daily at 06:00)
+#   - Set REPORT_EMAIL to receive the report by email
+#   - Set REPORT_DAYS to change the reporting window (default: 7 days)
+#   - Change the output path after -o if you prefer a file instead of email
+#
+# Install:
+#   sudo cp cron.d/report-ssh /etc/cron.d/report-ssh
+#   sudo chmod 644 /etc/cron.d/report-ssh
+#   sudo cp report-ssh.sh /usr/local/bin/report-ssh.sh
+#   sudo chmod 755 /usr/local/bin/report-ssh.sh
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Run daily at 06:00, report on the past 24 hours, email to root
+# Minute Hour DayOfMonth Month DayOfWeek User  Command
+0       6    *          *     *          root  /usr/local/bin/report-ssh.sh -d 1 -e root
+
+# Alternative: weekly report every Monday at 06:00 covering the past 7 days
+# 0 6 * * 1 root /usr/local/bin/report-ssh.sh -d 7 -e root
+
+# Alternative: write report to a file instead of emailing it
+# 0 6 * * * root /usr/local/bin/report-ssh.sh -d 1 -o /var/log/ssh-report-$(date +\%Y\%m\%d).log
