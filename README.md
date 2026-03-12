@@ -40,6 +40,7 @@ sudo chmod 755 /usr/local/bin/report-ssh.sh
 report-ssh.sh [OPTIONS]
 
 Options:
+  -a         Show authentication type for each session-open event
   -d DAYS    Number of days to report on (default: 7)
   -e EMAIL   Email address to send report to
   -o FILE    Write report to FILE instead of stdout
@@ -57,6 +58,9 @@ sudo report-ssh.sh
 
 # Report on the last 24 hours only
 sudo report-ssh.sh -d 1
+
+# Show authentication type for each session
+sudo report-ssh.sh -a
 
 # Email a weekly report
 sudo report-ssh.sh -d 7 -e admin@example.com
@@ -193,6 +197,8 @@ captures 60 seconds of traffic, and emails the report to `root`.
 
 ## Sample Output (report-ssh.sh)
 
+Default output (no `-a` flag):
+
 ```
 ============================================================
   SSH Session Report
@@ -224,4 +230,17 @@ captures 60 seconds of traffic, and emails the report to `root`.
 ============================================================
   End of Report
 ============================================================
+```
+
+With `-a` (authentication type shown):
+
+```
+------------------------------------------------------------
+  SSH SESSIONS OPENED (last 7 day(s))
+------------------------------------------------------------
+  TIMESTAMP      USER             AUTH TYPE       LOG ENTRY
+  ---------      ----             ---------       ---------
+  Jan  8 09:12  alice            publickey       Jan  8 09:12:34 myserver sshd[1234]: pam_unix(sshd:session): session opened for user alice by (uid=0)
+  Jan  8 14:00  bob              password        Jan  8 14:00:00 myserver sshd[5678]: pam_unix(sshd:session): session opened for user bob by (uid=0)
+  Jan  9 08:45  alice            publickey       Jan  9 08:45:11 myserver sshd[9012]: pam_unix(sshd:session): session opened for user alice by (uid=0)
 ```
